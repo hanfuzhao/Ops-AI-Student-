@@ -1,20 +1,56 @@
 """
 Precomputes all demand aggregations from demand_enriched.parquet at startup.
 Keeps only ~44K rows in memory (zone × hour × dow profile), not 6.3M raw rows.
+
+Week 3 change: the raw parquet now goes through the data quality checks in
+validation/check_data_quality.py. If the upstream data has problems they get
+logged and fixed, so the API keeps running instead of crashing or quietly
+serving wrong forecasts.
 """
-import pandas as pd
-import numpy as np
-from pathlib import Path
-import lightgbm as lgb
-from datetime import datetime, timedelta
+import os
+import sys
 import json
-import requests
+import logging
+from pathlib import Path
+from datetime import datetime, timedelta
 from functools import lru_cache
 
+import pandas as pd
+import numpy as np
+import lightgbm as lgb
+import requests
+
+logging.basicConfig(level=logging.INFO,
+                    format="%(asctime)s %(levelname)s [%(name)s] %(message)s")
+logger = logging.getLogger("nyc_cab.data")
+
+# Add week3/ to the path so we can import the validation package.
+_WEEK3 = Path(__file__).resolve().parent.parent
+if str(_WEEK3) not in sys.path:
+    sys.path.insert(0, str(_WEEK3))
+from validation.check_data_quality import load_and_validate_data
+
 _ROOT = Path(__file__).parent.parent.parent
-DATA_PATH   = _ROOT / "data" / "processed" / "demand_enriched.parquet"
+
+# Week 3 data feed. Set DEMAND_DATA_PATH to point this at live data instead.
+DATA_PATH = Path(os.environ.get(
+    "DEMAND_DATA_PATH", _WEEK3 / "data" / "demand_enriched_corrupted.parquet"))
+BASELINE_PATH = _WEEK3 / "data" / "demand_enriched_baseline.parquet"
 LOOKUP_PATH = _ROOT / "Meta Data" / "Lookups" / "taxi_zone_lookup.csv"
 MODEL_PATH  = _ROOT / "data" / "processed" / "lgbm_demand_model.txt"
+
+
+def _load_baseline():
+    """Load the clean baseline data. The validator uses it for comparison,
+    and it's also the last-resort fallback if everything else fails."""
+    try:
+        return pd.read_parquet(BASELINE_PATH)
+    except Exception as exc:
+        logger.warning("could not load baseline data: %s", exc)
+        return None
+
+
+_BASELINE = _load_baseline()
 
 # Fixed reference point: end of 2nd week in Feb 2026 (the latest complete month)
 # Data before this date is actual; from this point forward uses model predictions
@@ -72,12 +108,16 @@ FEATURES = [
 
 
 def _load():
-    print("[NYC Cab Analytics] Loading demand profile...")
-    df = pd.read_parquet(
+    logger.info("Loading demand profile from %s", DATA_PATH)
+    # Check and clean the data before the model sees it. load_and_validate_data
+    # won't raise: it returns fixed data on bad data, and falls back to the
+    # baseline if the file can't be read at all.
+    df = load_and_validate_data(
         DATA_PATH,
+        baseline_df=_BASELINE,
         columns=["PULocationID", "hour", "dayofweek", "trip_count", "is_holiday", "time_bucket"],
     )
-    
+
     # Identify specific holidays
     df['time_bucket'] = pd.to_datetime(df['time_bucket'])
     df['holiday_name'] = df.apply(
@@ -109,13 +149,26 @@ def _load():
     # Combine both profiles
     profile = pd.concat([regular_profile, holiday_profile], ignore_index=True)
     
-    zones_df = pd.read_csv(LOOKUP_PATH).rename(
-        columns={"LocationID": "zone_id", "Zone": "name",
-                 "Borough": "borough", "service_zone": "service_zone"}
-    )
-    print(f"[NYC Cab Analytics] Profile ready — {len(profile):,} rows, {profile['PULocationID'].nunique()} zones")
-    print(f"[NYC Cab Analytics]   Regular days: {len(regular_profile):,} rows")
-    print(f"[NYC Cab Analytics]   Holidays: {len(holiday_profile):,} rows")
+    try:
+        zones_df = pd.read_csv(LOOKUP_PATH).rename(
+            columns={"LocationID": "zone_id", "Zone": "name",
+                     "Borough": "borough", "service_zone": "service_zone"}
+        )
+    except Exception as exc:
+        # If the lookup file is missing, fall back to basic zone metadata
+        # instead of crashing the whole API.
+        logger.warning("zone lookup unavailable (%s), using basic metadata", exc)
+        zone_ids = sorted(profile["PULocationID"].unique())
+        zones_df = pd.DataFrame({
+            "zone_id": zone_ids,
+            "name": [f"Zone {z}" for z in zone_ids],
+            "borough": "Unknown",
+            "service_zone": "Unknown",
+        })
+
+    logger.info("Profile ready — %d rows, %d zones (regular: %d, holiday: %d)",
+                len(profile), profile["PULocationID"].nunique(),
+                len(regular_profile), len(holiday_profile))
     return profile, zones_df
 
 
@@ -131,9 +184,9 @@ def _load_model():
 
 
 def _load_full_demand():
-    """Load full demand data for lag calculation."""
-    print("[NYC Cab Analytics] Loading full demand data for forecasting...")
-    df = pd.read_parquet(DATA_PATH)
+    """Load the full demand data for lag calculation (checked and cleaned)."""
+    logger.info("Loading full demand data for forecasting...")
+    df = load_and_validate_data(DATA_PATH, baseline_df=_BASELINE)
     df['time_bucket'] = pd.to_datetime(df['time_bucket'])
     return df
 
