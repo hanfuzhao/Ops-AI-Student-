@@ -166,7 +166,7 @@ def _load():
             "service_zone": "Unknown",
         })
 
-    logger.info("Profile ready — %d rows, %d zones (regular: %d, holiday: %d)",
+    logger.info("Profile ready: %d rows, %d zones (regular: %d, holiday: %d)",
                 len(profile), profile["PULocationID"].nunique(),
                 len(regular_profile), len(holiday_profile))
     return profile, zones_df
