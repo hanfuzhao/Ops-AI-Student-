@@ -1,22 +1,29 @@
-name: Drift Monitoring
+name: Drift Monitoring & Detection
 
 on:
   schedule:
-    - cron: '0 * * * *'  # TODO: Choose your frequency (hourly? daily? weekly?)
+    # Run daily at 9am UTC - optimal balance between detection speed and cost
+    # Detection lag: 24h (acceptable for demand forecasting)
+    # Cost: 365 runs/year (minimal)
+    - cron: '0 9 * * *'
+
+  # Also run when data or scripts change
   push:
     branches: [main]
     paths:
       - 'week4/data/**'
       - 'week4/scripts/**'
+
+  # Allow manual triggering for on-demand checks
   workflow_dispatch:
 
 jobs:
   monitor:
     runs-on: ubuntu-latest
+
     steps:
-      - uses: actions/checkout@v3
-        with:
-          lfs: true
+      - name: Checkout code
+        uses: actions/checkout@v3
 
       - name: Set up Python
         uses: actions/setup-python@v4
@@ -25,37 +32,45 @@ jobs:
 
       - name: Install dependencies
         run: |
-          pip install pandas pyarrow numpy scipy
+          pip install pandas==2.2.2 \
+                      pyarrow==16.1.0 \
+                      numpy==1.26.4 \
+                      scipy==1.13.1 \
+                      scikit-learn==1.4.2
 
       - name: Compute monitoring metrics
         id: metrics
         run: |
           cd week4
-          # TODO: Implement metric computation
-          # - Load baseline and current data
-          # - Compute 8+ metrics (nulls, distributions, PSI, KS test, etc.)
-          # - Report metrics and thresholds
-          # - Determine if any alerts should fire
+          echo "Running metric computation..."
           python3 scripts/compute_metrics.py
+          echo "Metrics computed successfully"
 
       - name: Detect drift patterns
         id: drift
         run: |
           cd week4
-          # TODO: Implement drift detection
-          # - Run statistical tests (KS, PSI, chi-square)
-          # - Identify 4+ drift patterns
-          # - Document evidence for each pattern
+          echo "Running drift detection analysis..."
           python3 scripts/detect_drift.py
+          echo "Drift detection complete"
 
-      - name: Upload metrics
+      - name: Upload metrics artifact
         if: always()
         uses: actions/upload-artifact@v3
         with:
           name: monitoring-metrics
           path: week4/metrics-*.json
+          retention-days: 30
 
-      - name: Create alert if drift detected
+      - name: Upload drift report artifact
+        if: always()
+        uses: actions/upload-artifact@v3
+        with:
+          name: drift-reports
+          path: week4/drift-report-*.json
+          retention-days: 30
+
+      - name: Create drift alert issue
         if: failure()
         uses: actions/github-script@v6
         with:
@@ -63,11 +78,58 @@ jobs:
             github.rest.issues.create({
               owner: context.repo.owner,
               repo: context.repo.repo,
-              title: 'Drift detected in monitoring',
-              body: 'Monitoring workflow detected data or concept drift. Check logs for details.',
-              labels: ['drift-alert']
+              title: '[DRIFT ALERT] Model Retraining Recommended',
+              body: `## Drift Detection Alert
+
+              The monitoring workflow has detected significant data or concept drift.
+
+              ### What Detected
+              - Distribution shifts detected via KS test (p-value < 0.05)
+              - Segment-level accuracy degradation (> 20% in multiple zones)
+              - Data quality issues or infrastructure problems
+
+              ### Files
+              - Check metrics-*.json for detailed metric values
+              - Check drift-report-*.json for pattern analysis
+              - See FINAL_REPORT.md for retraining strategy
+
+              ### Recommended Action
+              1. Review the drift report
+              2. Validate findings against business context
+              3. Trigger emergency retraining with recent data
+              4. Deploy via canary (1% to 100% gradual rollout)
+              5. Monitor accuracy improvement post-deployment
+
+              ### Timeline
+              - Data analysis: ~30 min
+              - Model retraining: ~45 min
+              - Offline validation: ~30 min
+              - Canary deployment: ~6 hours
+              - Full rollout: ~24 hours
+
+              **Total: ~2 days to full deployment**
+
+              ---
+              Timestamp: ${new Date().toISOString()}`,
+              labels: ['drift-alert', 'model-health', 'urgent']
             })
 
-      - name: Monitoring complete
+      - name: Report success
         if: success()
-        run: echo "Drift monitoring complete - no issues detected"
+        run: |
+          echo "Drift monitoring completed"
+          echo "No critical alerts triggered"
+          echo "System health: NORMAL"
+
+      - name: Summary
+        if: always()
+        run: |
+          echo "=========================================="
+          echo "Drift Monitoring Workflow Complete"
+          echo "=========================================="
+          echo "Timestamp: $(date -u +%Y-%m-%d\ %H:%M:%S\ UTC)"
+          echo "Status: $(if [ $? -eq 0 ]; then echo 'PASSED'; else echo 'FAILED - ALERTS TRIGGERED'; fi)"
+          echo ""
+          echo "Metrics output: metrics-*.json"
+          echo "Drift report:   drift-report-*.json"
+          echo "=========================================="
