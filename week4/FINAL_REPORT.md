@@ -1,460 +1,132 @@
-# Week 4: Monitoring, Drift Detection & Retraining Strategy
+# Week 4: Monitoring, Drift Detection, and Retraining Strategy
 
-**Date**: June 3, 2026  
-**Status**: Complete Analysis
+June 3, 2026
 
----
+## Overview
 
-## Summary
+The February data shows that the demand model trained on January is no longer seeing the conditions it learned. Average trips per 15-minute interval fell from 14.07 to 12.56, about an 11% drop, and the change is concentrated rather than uniform: a handful of zones lost a fifth to nearly half of their volume while the rest held steady. The Kolmogorov-Smirnov test puts the chance this is sampling noise below 0.001, so it is worth acting on.
 
-The demand forecasting system for NYC taxi trips shows clear signs of drift starting in February 2026. I identified 7 distinct patterns through statistical analysis:
+In total I found seven separate drift signals: two that show up as shifts in the input distribution (overall trip volume and the day-of-week mix) and five that are zone-specific demand collapses. The recommendation at the end is to retrain on February data, but only after validating the new model against held-out ground truth and rolling it out gradually.
 
-**Data drift patterns (2)**:
-- Overall trip distribution shifted down significantly
-- Day-of-week patterns also shifted
+## Baseline and what changed
 
-**Concept drift patterns (5)**:
-- Specific zones experienced demand drops
-- Zones 45, 88, 195, 209, 230 all affected
+January 1-15 is the reference period the current model was trained on. It is clean: no missing values, no duplicate rows, all 57 pickup zones present across 82,080 rows (15 days, 57 zones, 96 quarter-hour buckets a day).
 
-The main change: average demand per 15-minute interval dropped from 14.07 to 12.56 trips (10.8% decrease). Some zones were hit harder, with drops of 21-48%. Statistical tests show these changes are genuine (KS p-value < 0.001), not just noise.
+| | Baseline (Jan 1-15) | New (Feb 2-28) |
+|---|---|---|
+| Rows | 82,080 | 147,744 |
+| Mean trips / 15 min | 14.07 | 12.56 |
+| Std dev | 19.24 | 17.35 |
+| Null rate | 0% | 0% |
+| Duplicate rate | 0% | 0% |
 
-**What this means**: The model trained on January data is now seeing January conditions less frequently. We need to retrain using February data, test it carefully, then roll out gradually.
+The thing that stands out is that February has 80% more rows but a lower average. More data and less demand at the same time rules out a sampling artifact and points to a real change in rider behavior.
 
----
+Data quality itself is fine in both periods. Nothing is missing or duplicated, so whatever is happening is in the signal, not the pipeline.
 
-## Part 1: Data Analysis & Baseline
+## The drift patterns
 
-### The Baseline (Jan 1-15, 2026)
+### Trip volume shifted down
 
-Starting data looked clean and normal:
+The whole trip_count distribution moved left, not just the mean. The tails came in noticeably:
 
-| What | Value | Notes |
-|------|-------|-------|
-| Rows | 82,080 | 15 days × 57 zones × 96 15-min intervals |
-| Avg trips/15min | 14.07 | This is our starting point |
-| Standard deviation | 19.24 | Data has right skew (peaks are higher) |
-| Null values | 0% | No missing data |
-| Duplicates | 0% | No exact row copies |
-| Zones covered | 57 | All NYC pickup locations included |
+| | Baseline | February |
+|---|---|---|
+| Mean | 14.07 | 12.56 |
+| Std dev | 19.24 | 17.35 |
+| 95th pct | 53 | 44 |
+| 99th pct | 91 | 78 |
 
-**Feature breakdown**:
-- trip_count ranges from 0 to 213 trips
-- hour is evenly distributed (0-23)
-- day of week shows slight weekend decrease
+KS comes back at p < 0.001. The practical consequence is that the busy intervals the model expects show up less often, so its high-end predictions will tend to run hot. Cause is unknown from the data alone; weather, a fare or policy change, or a seasonal dip are all plausible.
 
-### What Changed (Feb 2-28, 2026)
+### Day-of-week mix moved too
 
-The new period had more data but lower demand:
+Running KS on dayofweek also returns p < 0.001. Comparing daily averages, Mondays took the biggest hit and the weekend softened less:
 
-| Metric | Baseline | Feb 2-28 | Change |
-|--------|----------|----------|--------|
-| Sample size | 82,080 rows | 147,744 rows | +80% more data |
-| Avg trips/15min | 14.07 | 12.56 | -10.8% |
-| Standard deviation | 19.24 | 17.35 | -9.8% |
-| Null rate | 0% | 0% | No issues |
-| Duplicate rate | 0% | 0% | Still clean |
-
-**Why this matters**: We collected 80% more data points, but the average demand went DOWN. This isn't a sampling fluke. Something changed in the real world.
-
----
-
-## Part 2: What Drift Did We Find?
-
-### Pattern 1: Overall Trip Count Dropped
-
-The distribution of trips shifted down across the board. When I ran the Kolmogorov-Smirnov test, p-value came back < 0.001. That's statistically significant.
-
-| Metric | Baseline | Feb | Change |
-|--------|----------|-----|--------|
-| Mean | 14.07 | 12.56 | -10.8% |
-| Std Dev | 19.24 | 17.35 | -9.8% |
-| 95th percentile | 53 | 44 | -17% |
-| 99th percentile | 91 | 78 | -14% |
-
-**So what?** The model learned "expect around 14 trips per 15 minutes." Now it mostly sees 12. High-traffic periods the model thinks are normal actually don't happen as often anymore.
-
-**Possible reasons**: Could be weather, policy changes, economic conditions, or just fewer people taking trips in February.
-
----
-
-### Pattern 2: Day-of-Week Pattern Shifted
-
-The model learned different demand patterns for different days of the week. That pattern also changed.
-
-| Day | Baseline avg | Feb avg | Change |
-|-----|--------------|---------|--------|
+| Day | Baseline | February | Change |
+|---|---|---|---|
 | Monday | 13.2 | 11.1 | -15.9% |
 | Friday | 15.4 | 13.8 | -10.4% |
 | Saturday | 13.8 | 12.1 | -12.3% |
 | Sunday | 13.2 | 12.4 | -6.1% |
 
-Weekend vs weekday ratio changed. The model may not predict weekend patterns correctly anymore.
+A model that assumes January's weekday/weekend balance will be off on the days that moved most.
 
----
+### Five zones drove most of the loss
 
-### Patterns 3-7: Specific Zones Got Hit Hard
+The global drop is not spread evenly. Five zones account for most of it:
 
-Some neighborhoods were affected more than others. Five zones had significant drops:
+| Zone | Baseline | February | Change |
+|---|---|---|---|
+| 195 | 0.12 | 0.06 | -48.1% |
+| 88 | 2.08 | 1.52 | -26.9% |
+| 209 | 1.09 | 0.80 | -26.9% |
+| 230 | 29.26 | 22.89 | -21.8% |
+| 45 | 1.14 | 0.90 | -21.1% |
 
-| Zone | Jan avg | Feb avg | Drop |
-|------|---------|---------|------|
-| Zone 45 | 1.14 | 0.90 | -21.1% |
-| Zone 88 | 2.08 | 1.52 | -26.9% |
-| Zone 195 | 0.12 | 0.06 | -48.1% |
-| Zone 209 | 1.09 | 0.80 | -26.9% |
-| Zone 230 | 29.26 | 22.89 | -21.8% |
+Zone 195's drop is the largest in percentage terms but it is a tiny zone, so the absolute effect is small. Zone 230 is the one that matters: it is the highest-volume zone in the system, and losing six or seven trips per interval there explains a large share of the overall 1.5-trip decline by itself. The other 52 zones are close to their January numbers. This is the kind of thing a single global accuracy number would hide, which is why the monitoring below tracks zones separately.
 
-**Zone 230 is critical** — it's the highest volume zone. Losing 6-7 trips per 15 minutes from that one zone explains a big chunk of the overall 1.5 trip decrease.
+## Monitoring metrics
 
-The other 52 zones stayed relatively stable.
+Eight metrics, grouped by what they protect against. Not all of them need the same cadence, and a couple are far more urgent than the rest, so the thresholds and frequencies differ.
 
----
+**Catching distribution drift early.** The KS test and PSI both compare a recent 7-day window against the January baseline on trip_count. KS flags a shift when its p-value drops below 0.05; PSI flags one above 0.25 (below 0.10 is noise, in between is worth watching). I run both daily at 8am, before the accuracy numbers come in. KS is the more sensitive of the two and is what caught the drift here; PSI is the easier one to put in front of a non-technical stakeholder because it is a single number. When both fire at once I treat the drift as confirmed. Worth noting: in this dataset PSI came in at only 0.0057 even though KS was decisive, which is a good reminder that a small PSI does not clear you if the test designed to catch shape changes is screaming.
 
-## Part 3: Monitoring Framework
+**Watching model performance.** Overall accuracy is the headline metric, but on its own it is misleading, so the real workhorse is per-zone accuracy across all 57 zones. Baseline accuracy runs around 91% overall and 85-95% per zone; I alert when any zone falls under 80%. Both are checked once a day at 9am, after the previous day's ground truth has landed. High-volume zones like 230 get watched more closely, and the very low-volume zones can use a looser threshold since their accuracy is naturally noisier.
 
-I've designed 8 metrics to catch problems like this early.
+**Data quality.** Null rate and duplicate rate are cheap and should always read zero, so any movement is suspicious. I check them every four hours. Null rate above 1% in a key field, or duplicates above 0.5%, usually means the pipeline broke or double-wrote, and the right response is to page the data engineer rather than wait for the next daily cycle.
 
-### Metric 1: Overall Accuracy
+**Infrastructure and model health.** Data freshness checks how old the newest record is; past four hours, the feed has probably stalled, and since we cannot retrain on data we do not have, that is checked hourly. The last metric watches the spread of the model's own predictions: if the standard deviation collapses toward zero the model has degenerated into predicting one number for everything, which throws no errors and is otherwise invisible. That one runs every six hours.
 
-**What**: Percentage of predictions that match actual values  
-**Baseline**: 85-91% (from January)  
-**Alert if**: Drops below 80% (5% degradation)  
-**Check**: Daily at 9am UTC  
-**Action**: Review recent data, prepare retraining
+| Metric | Baseline | Alert | Cadence |
+|---|---|---|---|
+| Accuracy (per zone) | 85-95% | < 80% | daily |
+| KS test | p > 0.05 | p < 0.05 | daily |
+| PSI | < 0.10 | > 0.25 | daily |
+| Null rate | 0% | > 1% | 4h |
+| Duplicate rate | 0% | > 0.5% | 4h |
+| Data freshness | < 2h | > 4h | hourly |
+| Prediction spread | std 5-6 | std < 0.1 | 6h |
 
-The model's not always right, but 80% is the minimum acceptable.
+## Retraining strategy
 
----
+### When to retrain
 
-### Metric 2: Accuracy by Zone
+I use three triggers rather than one, because the signals arrive at different speeds. The proactive trigger fires on drift alone (KS p < 0.01 or PSI > 0.25) and aims to retrain within a couple of hours, before accuracy has even degraded. The reactive trigger fires on measured performance (any zone under 80%, or global under 82%) and is the safety net for drift the statistical tests miss. On top of both there is a standing weekly retrain every Monday at 2am, which keeps the model current even in quiet periods.
 
-**What**: Same as above, but for each of the 57 zones separately  
-**Baseline**: 85-95% per zone  
-**Alert if**: Any zone drops below 80%  
-**Check**: Daily at 9am UTC  
-**Action**: Investigate that specific zone
+For the February data all three would have fired, so the call is clear: retrain now.
 
-Zones with low traffic naturally have more variance. May need looser thresholds for those.
+### Pipeline
 
----
+The retrain runs as a sequence with a hard stop in the middle:
 
-### Metric 3: Null/Missing Data Check
+1. **Prepare** the February 2-28 data (147,744 rows), rebuild the lag and rolling-average features, and confirm it is clean before training. About 30 minutes.
+2. **Train** with the same algorithm and hyperparameters as the deployed model. Changing the data and the model at once makes a regression impossible to diagnose, so this step deliberately holds everything but the data fixed. About 45 minutes.
+3. **Validate offline** against held-out ground truth from Jan 16 to Feb 1. The new model has to be within 2 points of the old one globally, and no single zone is allowed to fall more than 10 points below its baseline. If it fails either test, stop here and keep the current model. This is the gate that prevents shipping a worse model.
+4. **Canary** at 1% of traffic for six hours, watching accuracy, latency, and error rate. Anything off and it rolls straight back.
+5. **Ramp** over the next day: 5%, then 25%, 50%, 100%, with the same auto-rollback at each step.
+6. **Keep watching** with the daily metrics above once it is fully live.
 
-**What**: Percentage of null values in key fields  
-**Baseline**: 0% (we had clean data)  
-**Alert if**: > 1% of any field is null  
-**Check**: Every 4 hours  
-**Action**: Page the data engineer immediately
+End to end that is roughly two days, most of it the canary and ramp.
 
-If we suddenly get a lot of missing values, the data pipeline probably broke.
+### Versioning and rollback
 
----
+Every model is saved with its training date, sample count, validation accuracy, and per-zone breakdown, named so the lineage is obvious (for example `model_v2026-02-28`). The January baseline is kept indefinitely; the last three versions are kept for rollback and anything older is pruned after 30 days. Rollback is automatic if accuracy drops more than 5% after a deploy, and a person can revert manually within the first week if something subtler shows up.
 
-### Metric 4: KS Test (Distribution Check)
+## The monitoring workflow and why daily
 
-**What**: Statistical test comparing two distributions  
-**Baseline**: p-value > 0.05 (distributions are similar)  
-**Alert if**: p-value < 0.05 (distributions differ)  
-**Check**: Daily at 8am UTC  
-**Action**: Investigate what changed
+The GitHub Actions workflow in `week4/.github/workflows/monitor-drift.yml` runs `compute_metrics.py` and then `detect_drift.py` on a schedule, and opens an issue if either crosses a threshold. I set the schedule to once a day at 9am UTC.
 
-This is what caught the drift in this analysis. Useful for early warning.
+Daily is the right granularity for this problem. Demand forecasting can tolerate a 24-hour detection lag, since one day of slightly-off predictions is not a catastrophe, and a daily job costs almost nothing. Hourly would catch drift a few hours sooner but multiply the cost and the noise for a signal that does not move that fast, and weekly would let nearly a week of drift accumulate before anyone looked. The faster checks (data quality, freshness) still run more often inside the framework, but the core drift-and-accuracy pass is daily.
 
----
+## Recommendations
 
-### Metric 5: PSI (Population Stability Index)
+The immediate action is to retrain on the February data through the pipeline above and to look into the five zones by hand, starting with 230 because of its volume and 195 because of the size of its drop. A 20-plus percent fall in a single zone usually has a concrete cause such as a closure, construction, or a competing service, and that is worth knowing before assuming the model is simply stale.
 
-**What**: Single number summarizing how much a distribution changed  
-**How**: PSI = Σ(actual% - expected%) × ln(actual%/expected%)  
-**Baseline**: < 0.10 (negligible change)  
-**Alert if**: > 0.25 (significant change)  
-**Check**: Daily at 8am UTC  
-**Action**: If PSI + KS both alert, definitely retrain
+Beyond the immediate fix, the monitoring is currently global-first; the next improvement is per-zone alerting so a localized collapse like Zone 230's is caught on its own rather than diluted into the average. Further out, a shadow-mode deployment (run the new model alongside the old without serving it, and compare against ground truth for a week or two) would give more confidence than the offline test alone before a full rollout.
 
-PSI is easier to explain to non-technical people than KS test.
+## Implementation notes
 
----
+The code is in `week4/scripts/`: `metric_template.py` holds the eight metric implementations in a `MetricComputer` class, `compute_metrics.py` loads the data and checks every metric against its threshold, `detect_drift.py` runs the statistical tests and writes out the pattern report, and `test_monitoring.py` covers the lot. Running `compute_metrics.py` on the February window flags three alerts (the trip_count and dayofweek shifts, plus a stale-data flag from the fixed dataset) and writes its results to a timestamped JSON file.
 
-### Metric 6: Duplicate Check
-
-**What**: Percentage of rows that are exact duplicates  
-**Baseline**: 0%  
-**Alert if**: > 0.5%  
-**Check**: Every 4 hours  
-**Action**: Alert ops, check for ETL issues
-
-Duplicates usually mean something in the pipeline double-wrote data.
-
----
-
-### Metric 7: Data Freshness
-
-**What**: How old is the newest data point?  
-**Baseline**: < 2 hours  
-**Alert if**: > 4 hours since latest record  
-**Check**: Every 1 hour  
-**Action**: Check if ETL job is running
-
-If data stops updating, we can't retrain new models.
-
----
-
-### Metric 8: Prediction Distribution
-
-**What**: Are the model's predictions varying normally or stuck on one value?  
-**Baseline**: mean ≈ 14, std ≈ 5-6  
-**Alert if**: std < 0.1 (model predicting same value everywhere)  
-**Check**: Every 6 hours  
-**Action**: Rollback model immediately (it's broken)
-
-This catches "model collapse" where the model learns to just output the average.
-
----
-
-## Part 4: Retraining Strategy
-
-### When to Retrain (3-Tier Approach)
-
-**Tier 1 - Proactive (Fast)**:
-```
-IF KS p-value < 0.01 OR PSI > 0.25:
-  Retrain within 2 hours
-  Used for: Clear distribution shifts
-```
-
-**Tier 2 - Reactive (Emergency)**:
-```
-IF any zone accuracy < 80% OR global accuracy < 82%:
-  Retrain within 4 hours
-  Used for: Performance degradation
-```
-
-**Tier 3 - Scheduled (Baseline)**:
-```
-IF Monday AND time == 02:00 UTC:
-  Retrain weekly
-  Used for: Continuous improvement
-```
-
-Right now, all three conditions are met. Definitely should retrain.
-
----
-
-### The Retraining Pipeline (6 Steps)
-
-**Step 1: Prepare data (30 min)**
-- Load February 2-28 data (147,744 records)
-- Compute features: lagged values, rolling averages, etc.
-- Output: clean training set
-- Check: no nulls, duplicates < 0.5%
-
-**Step 2: Train model (45 min)**
-- Use same algorithm as current model (XGBoost or Random Forest)
-- Use same hyperparameters (no tuning)
-- Output: new model weights
-- Record: training accuracy, validation accuracy
-
-**Step 3: Validate offline (30 min)**
-- Test new model vs old model on ground truth data from Jan 16-Feb 1
-- Decision rules:
-  - If new model >= old model - 2pp: proceed
-  - If new model < old model - 2pp: stop, keep current model
-  - Check per zone: reject if any zone accuracy < baseline - 10pp
-
-**Step 4: Canary deployment (6 hours)**
-- Send 1% of traffic to new model
-- Monitor: accuracy, latency, error rates
-- If healthy: proceed to Step 5
-- If degradation: rollback immediately
-
-**Step 5: Gradual rollout (24 hours)**
-- Hour 6: 5% new model
-- Hour 12: 25% new model  
-- Hour 18: 50% new model
-- Hour 30: 100% new model
-- Monitor at each step, auto-rollback if issues
-
-**Step 6: Keep monitoring (ongoing)**
-- Daily accuracy checks
-- Daily drift detection
-- Weekly performance reviews
-- Monthly retraining readiness assessment
-
-**Total time**: About 2 days including the canary phase.
-
----
-
-### Model Versioning
-
-Store models with metadata:
-
-```
-models/
-├── model_v2026-01-15.pkl (BASELINE - keep forever)
-│   ├── training_date: 2026-01-15
-│   ├── training_samples: 82,080
-│   ├── accuracy: 0.91
-│   └── deployed_date: 2026-01-15
-│
-├── model_v2026-02-28.pkl (NEW - candidate)
-│   ├── training_date: 2026-02-28
-│   ├── training_samples: 147,744
-│   ├── accuracy: 0.89
-│   └── deployed_date: null
-│
-└── [older versions - delete after 30 days]
-```
-
-**Rollback rules**:
-- Automatic: If accuracy drops > 5%, switch back immediately
-- Manual: Data scientist can revert within 7 days
-- Keep: Current version + 3 previous versions
-- Delete: Anything older than 30 days
-
----
-
-## Part 5: Implementation
-
-All code is ready to use:
-
-**metric_template.py** — Contains the MetricComputer class with all 8 metrics implemented  
-**compute_metrics.py** — Loads data, computes metrics, checks thresholds, outputs JSON  
-**detect_drift.py** — Finds drift patterns with statistical evidence  
-**test_monitoring.py** — Unit tests for all metrics  
-
-**Sample output from running the code**:
-
-```
-Baseline: 82,080 rows
-New data: 147,744 rows
-
-Overall accuracy: 85%
-Trip count PSI: 0.0057
-Null rates: 0% (all fields)
-Duplicate rate: 0.0000%
-
-KS Tests:
-  trip_count: p < 0.001 (SHIFT)
-  dayofweek: p < 0.001 (SHIFT)
-  hour: p = 1.0 (no shift)
-
-Alerts triggered: 3
-  - DISTRIBUTION_SHIFT_TRIP_COUNT
-  - DISTRIBUTION_SHIFT_DAYOFWEEK
-  - DATA_STALE
-
-Output saved to: metrics-20260603_185209.json
-```
-
----
-
-## Part 6: GitHub Actions Workflow
-
-### Monitoring Frequency Decision: Daily at 9am UTC
-
-**Why daily?**
-- **Detection lag**: 24 hours (acceptable for demand forecasting)
-- **Cost**: Only 365 runs per year
-- **Actionability**: Enough time to prepare retraining before next cycle
-- **Balance**: Better than weekly (miss 6 days of drift) but cheaper than hourly
-
-The workflow runs two scripts:
-1. **compute_metrics.py** — Calculate all 8 metrics
-2. **detect_drift.py** — Find drift patterns
-
-If either finds issues, it creates a GitHub issue with alert details.
-
-Full workflow is in `.github/workflows/monitor-drift.yml`.
-
----
-
-## Part 7: Business Recommendations
-
-### Do This Now (Next 24 Hours)
-
-1. **Retrain the model**
-   - Use February 2-28 data
-   - Follow the 6-step pipeline above
-   - Expect accuracy to improve from 82% baseline to ~87%
-
-2. **Investigate the zone drops**
-   - Zone 195 dropped 48% — most critical
-   - Zones 45, 88, 209, 230 — investigate local events/closures
-
-3. **Deploy monitoring**
-   - Push monitor-drift.yml to your repo
-   - Set up daily runs at 9am UTC
-   - Configure Slack/email alerts
-
-### This Week
-
-4. **Implement zone-level monitoring**
-   - Currently monitoring global trends
-   - Add per-zone alerts for high-impact areas
-
-5. **Add real-time capabilities**
-   - Extend from daily to hourly metrics
-   - Implement automated rollback logic
-
-### Next Month
-
-6. **Build feature store**
-   - Centralize feature computation
-   - Ensure offline/online consistency
-
-7. **Implement shadow mode**
-   - Run new models in production without serving
-   - Compare against ground truth for 1-2 weeks
-
-8. **Set up regular reviews**
-   - Weekly performance dashboards
-   - Monthly retraining decisions
-   - Quarterly framework updates
-
----
-
-## Conclusion
-
-The demand forecasting system has clear, measurable drift over February 2026. Seven distinct patterns emerged with high statistical confidence (KS p < 0.001). This is real drift, not noise.
-
-The good news: We have a framework to detect this, a strategy to respond, and code that's ready to deploy.
-
-Next step: Execute the retraining pipeline. If done correctly, model accuracy should improve from 82% to around 87%.
-
----
-
-## Technical Details
-
-### All 8 Metrics Implemented
-
-| # | Metric | Type | Implementation |
-|---|--------|------|----------------|
-| 1 | Accuracy | Performance | Direct comparison |
-| 2 | Accuracy by Zone | Performance | Grouped comparison |
-| 3 | Null Rates | Data Quality | Count nulls |
-| 4 | KS Test | Data Drift | scipy.stats.ks_2samp |
-| 5 | PSI | Data Drift | Binned distribution |
-| 6 | Pred Distribution | Model Health | Mean & std |
-| 7 | Data Freshness | Infrastructure | Timestamp age |
-| 8 | Duplicate Rate | Data Quality | Row matching |
-
-### Statistical Methods
-
-**Kolmogorov-Smirnov (KS)**: Tests if two distributions differ  
-- Null hypothesis: Both distributions are identical
-- Reject if p-value < 0.05
-- Applied to: trip_count, hour, dayofweek
-
-**Population Stability Index (PSI)**: Single number for distribution change  
-- Formula: Σ(new% - baseline%) × ln(new% / baseline%)
-- Interpretation: < 0.1 (ok), 0.1-0.25 (watch), > 0.25 (retrain)
-
-**Per-segment statistics**: Compare mean values by zone/hour  
-- Used to identify concept drift
-- Zone 195 showed clearest decline at -48%
-
----
-
-**Report generated**: 2026-06-03  
-**Status**: Analysis complete, ready for action
+Two methods underpin the drift detection. KS (`scipy.stats.ks_2samp`) is a non-parametric test of whether two samples come from the same distribution; we reject that they do when p < 0.05, and apply it to trip_count, hour, and dayofweek. PSI bins both distributions and sums the weighted log-ratio of the bin proportions, giving the single 0.0057 figure quoted above. The zone-level patterns come from comparing per-zone means directly rather than from a test.
