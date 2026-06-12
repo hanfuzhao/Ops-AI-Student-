@@ -18,6 +18,7 @@ from pathlib import Path
 from app.agent import Agent
 
 DELAY = float(os.getenv("DEMO_DELAY", "30"))
+MODEL = os.getenv("GEMINI_MODEL", "gemini-2.5-flash")
 
 DB = str(Path(__file__).resolve().parent / "data" / "techcorp.db")
 
@@ -36,7 +37,8 @@ QUERIES = [
 
 
 def main():
-    agent = Agent(DB)
+    agent = Agent(DB, model=MODEL)
+    print(f"model: {MODEL}  (delay {DELAY:.0f}s between queries)")
     for i, (question, role) in enumerate(QUERIES, 1):
         result = agent.query(question, role)
         print(f"\n[{i}] ({role}) {question}")
