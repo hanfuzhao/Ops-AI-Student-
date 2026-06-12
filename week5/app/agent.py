@@ -257,6 +257,11 @@ class Agent:
             raise ValueError(
                 "No API key. Pass api_key= or set GOOGLE_API_KEY. "
                 "Free keys: https://aistudio.google.com/app/apikey")
+        if not self.api_key.isascii():
+            raise ValueError(
+                "GOOGLE_API_KEY has non-ASCII characters, which looks like a "
+                "placeholder rather than a real key. A real key looks like "
+                "'AIza...'. Get one at https://aistudio.google.com/app/apikey")
 
         self.client = genai.Client(api_key=self.api_key)
         self.tools: Dict[str, Tool] = {
