@@ -5,10 +5,19 @@ Set your key first, then run from the week5 folder:
     python3 demo_queries.py
 
 Take the screenshot of this output for the assignment.
+
+The free Gemini tier allows only a few requests per minute, and each query
+makes two model calls (one to pick a tool, one to answer), so there is a
+short pause between queries to stay under the limit. Override it with
+DEMO_DELAY (seconds) if your key has a higher quota, e.g. DEMO_DELAY=0.
 """
 
+import os
+import time
 from pathlib import Path
 from app.agent import Agent
+
+DELAY = float(os.getenv("DEMO_DELAY", "30"))
 
 DB = str(Path(__file__).resolve().parent / "data" / "techcorp.db")
 
@@ -33,6 +42,8 @@ def main():
         print(f"\n[{i}] ({role}) {question}")
         print(f"    {result['answer']}")
         print(f"    tokens={result['tokens_used']}  cost=${result['cost']:.6f}")
+        if DELAY and i < len(QUERIES):
+            time.sleep(DELAY)
 
     m = agent.get_metrics()
     print("\n" + "=" * 60)
