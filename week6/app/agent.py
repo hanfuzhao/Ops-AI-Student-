@@ -3,14 +3,13 @@ TechCorp agent: answers business questions by letting Gemini decide which
 tools to call, running those tools against the local data, and asking the
 model to write the final answer from the results.
 
-The three tools read the data that actually ships with the assignment:
+The three tools read the data that ships with the assignment:
   - employees live in the SQLite database (data/techcorp.db)
   - policy documents live in data/documents.json
   - expense and travel rules live in data/policies.json
 
-The starter template assumed a few extra SQL tables (expense_policies,
-per_diem, a documents table) that don't exist in the database, so the
-expense and policy tools read the JSON files instead.
+Note: the database only has the employees table. Expense limits and policy
+text aren't tables, so those two tools read the JSON files instead.
 """
 
 import json
