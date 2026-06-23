@@ -8,7 +8,7 @@ import json
 import sys
 from pathlib import Path
 
-# add parent dir to path so we can import the starter
+# make parent dir importable
 sys.path.insert(0, str(Path(__file__).parent.parent))
 from cost_optimization_starter import CostAnalyzer, OptimizationStrategy, FeedbackLoop
 
@@ -40,19 +40,19 @@ def run_evaluation():
         text = q["question"]
         role = q["role"]
 
-        # optimization 1: caching
+        # check cache first
         hit, resp = strategy.apply_caching(text, fake_answer(text))
 
-        # optimization 2: model routing
+        # pick model based on complexity
         model = strategy.select_model_by_complexity(text)
 
-        # optimization 3: retrieval trimming
+        # trim retrieval count
         docs = strategy.optimize_retrieval_count(15)
 
-        # optimization 4: compress response
+        # compress if long
         resp = strategy.enable_response_compression(resp)
 
-        # estimate cost
+        # figure out cost
         if hit:
             llm_cost = 0.0
         elif model == "gemini-1.5-flash":
