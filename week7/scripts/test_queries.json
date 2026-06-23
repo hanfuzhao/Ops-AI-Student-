@@ -1,0 +1,16 @@
+{
+  "test_queries": [
+    {"question": "What is the travel policy?", "role": "engineer", "category": "policy"},
+    {"question": "Who can approve expenses over $5000?", "role": "manager", "category": "approval"},
+    {"question": "What is the NYC per diem rate?", "role": "finance", "category": "lookup"},
+    {"question": "What is the compensation policy?", "role": "hr", "category": "hr"},
+    {"question": "Who is the CEO?", "role": "engineer", "category": "lookup"},
+    {"question": "What is the PTO policy?", "role": "engineer", "category": "policy"},
+    {"question": "Analyze and compare all department budgets in detail", "role": "finance", "category": "analysis"},
+    {"question": "Design a new onboarding process for remote employees with detailed steps", "role": "manager", "category": "design"},
+    {"question": "What is the travel policy for flights over 8 hours?", "role": "engineer", "category": "policy"},
+    {"question": "Evaluate the performance review process and recommend improvements", "role": "director", "category": "evaluation"},
+    {"question": "How do I book a business class flight?", "role": "engineer", "category": "policy"},
+    {"question": "Synthesize the Q3 financial results across all regions", "role": "executive", "category": "analysis"}
+  ]
+}
